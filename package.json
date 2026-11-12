@@ -1,0 +1,47 @@
+{
+  "name": "dsh-feiyu-lunchbox",
+  "version": "1.7.19",
+  "description": "肥鱼饭盒：左栏入口 + 大型悬浮「货架」，按 零食/饮料/米饭/炒菜/炖菜/炖汤/特殊 七类标签管理图片素材，支持进货、排货、换货、切换货架、货源、详情、设定、选货与钱包，并把「购入美味」拖进会话投喂给肥鱼。",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "icon.svg",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "icon": "./icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "lunchbox",
+    "shelf",
+    "肥鱼饭盒"
+  ]
+}

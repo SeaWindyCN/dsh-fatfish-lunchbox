@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="肥鱼饭盒">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd36e"/>
+      <stop offset="1" stop-color="#f0a72a"/>
+    </linearGradient>
+    <linearGradient id="lid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff6e0"/>
+      <stop offset="1" stop-color="#ffe2ad"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ec8e8"/>
+      <stop offset="1" stop-color="#2d8fbf"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="#2a2118"/>
+  <circle cx="128" cy="118" r="92" fill="#3a2c1c" opacity="0.55"/>
+
+  <!-- 提手 -->
+  <path d="M92 78 v-10 a12 12 0 0 1 12 -12 h48 a12 12 0 0 1 12 12 v10"
+        fill="none" stroke="#ffe2ad" stroke-width="13" stroke-linecap="round"/>
+
+  <!-- 盒盖 -->
+  <rect x="42" y="76" width="172" height="56" rx="20" fill="url(#lid)"/>
+  <rect x="42" y="76" width="172" height="56" rx="20" fill="none" stroke="#c98a1c" stroke-width="3" opacity="0.55"/>
+
+  <!-- 盒身 -->
+  <rect x="34" y="128" width="188" height="92" rx="26" fill="url(#body)"/>
+  <rect x="34" y="128" width="188" height="92" rx="26" fill="none" stroke="#b8730f" stroke-width="3" opacity="0.5"/>
+  <path d="M74 128 h108" stroke="#ffffff" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+
+  <!-- 盒身上的肥鱼 -->
+  <g transform="translate(72 152) scale(1.55)">
+    <path d="M4 15 c8 -11 24 -11 32 0 c-8 11 -24 11 -32 0 Z" fill="url(#sea)" stroke="#1f6e96" stroke-width="2.2" stroke-linejoin="round"/>
+    <path d="M36 15 l10 -7 v14 Z" fill="#2d8fbf" stroke="#1f6e96" stroke-width="2.2" stroke-linejoin="round"/>
+    <circle cx="12" cy="13" r="2.6" fill="#0b2b3a"/>
+    <circle cx="12" cy="13" r="0.9" fill="#ffffff"/>
+    <path d="M20 10 c3 3 3 7 0 10" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+    <path d="M28 9 c4 4 4 8 0 12" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" opacity="0.55"/>
+  </g>
+
+  <!-- 热气 -->
+  <path d="M186 66 c8 -8 0 -16 8 -24" fill="none" stroke="#ffe2ad" stroke-width="6" stroke-linecap="round" opacity="0.75"/>
+  <path d="M204 68 c7 -7 0 -14 7 -21" fill="none" stroke="#ffe2ad" stroke-width="5" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- 小贴纸：Tokens -->
+  <g transform="translate(150 190)">
+    <rect x="0" y="0" width="58" height="24" rx="12" fill="#2a2118" opacity="0.9"/>
+    <text x="29" y="16" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+          font-size="12" font-weight="700" fill="#ffd36e">Tokens</text>
+  </g>
+</svg>
