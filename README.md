@@ -4,6 +4,19 @@
 按 品牌 / 品类 / 规格 排货，标价（Tokens）/ 数量（份）写在白板上，勾选「挑选数量」
 形成一批「购入美味」，最后把它拖进会话投喂给肥鱼。
 
+## 安装
+
+1. 到 [Releases](https://github.com/SeaWindyCN/dsh-fatfish-lunchbox/releases) 下载最新的 `dsh-fatfish-lunchbox-v*.zip`，
+   解压到一个固定目录，例如 `D:\DSH\plugins\feiyu-lunchbox`（解压后这一层里应该有 `package.json`、`client.js`、`index.js`）。
+2. 让 DSH 认识它，二选一：
+   - **推荐**：用 Harness 的 `plugin_manager` 工具，`action: "install_bundle"`，`target` 填解压后的绝对路径（它会把目录 link 进 profile 并记进 `dsh.profile.bundles`）；
+   - 手动：把目录复制或 link 到 `%USERPROFILE%\.dsh\profiles\<你的 profile>\node_modules\dsh-feiyu-lunchbox`，
+     再把 `"dsh-feiyu-lunchbox"` 追加进该 profile `package.json` 的 `dsh.profile.bundles`。
+3. **重启 DSH 桌面端一次**——组合树只在启动时按 bundles 生成，热改不会加载新插件。
+4. 左栏出现饭盒图标就是装好了；点开看窗口底栏最左的版本号，应与本次 Release 的 `v1.7.19` 一致。
+
+> 仓库里没有 `test/` 目录：那套离线测试脚本是本机开发用的（里面写死了本机的绝对路径），留在开发机上，不随包发布。
+
 ## 功能对照
 
 | # | 需求 | 实现 |
