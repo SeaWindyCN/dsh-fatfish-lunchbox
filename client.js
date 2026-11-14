@@ -24,13 +24,15 @@ window.__ModuleLoader__.load({
 
     var PANEL_ID = 'feiyu-lunchbox'
     /* 窗口底部显示版本号：刷新后一眼能看出浏览器拿到的是哪一版。 */
-    var VERSION = '1.7.20'
+    var VERSION = '1.7.27'
 
 /* 1.7.2：有用户反馈「某些按钮点不动」。click 事件可能被上层元素或取消逻辑吃掉，
    这里统一用 pointerdown 先接一手（浏览器取消 click 也不影响），再用时间戳去重，
    保证一次点击只跑一次回调。 */
 var lastTapEl = null
 var lastTapAt = 0
+/* 1.7.27：标题栏整条都能拖，但拖完不要顺手点到「展开 / 关闭」 */
+var lastHeadDragAt = 0
 function tap (fn) {
   function fire (e) {
     if (e && e.type === 'pointerdown') { try { e.preventDefault() } catch (err) {} }
@@ -368,6 +370,10 @@ function tap (fn) {
     var IconSpark = makeGlyph([
       'M12 3.6l1.7 4.9 4.9 1.7-4.9 1.7L12 16.8l-1.7-4.9L5.4 10.2l4.9-1.7L12 3.6Z'
     ])
+    /* 1.7.21（需求⑤）：「全选」用的小勾。 */
+    var IconCheck = makeGlyph([
+      'M4.6 12.6l4.6 4.6L19.4 7.2'
+    ])
     var IconSource = makeGlyph([
       'M4.2 7.4 12 3.6l7.8 3.8-7.8 3.8L4.2 7.4Z',
       'M4.2 12 12 15.8 19.8 12',
@@ -618,6 +624,8 @@ function tap (fn) {
         dragging: false,
         sourceQuery: '',
         sourceResults: null,
+        /* 1.7.21（需求⑦）：查询直接跳到货架上的「货源」视图，不再走确认面板。 */
+        searchMode: null,
         note: null,
         sessionId: null,
         lastError: null,
@@ -633,7 +641,8 @@ function tap (fn) {
         /* 1.5.0：上传美食包时的预览清单（只在本机内存里）。 */
         pack: null,
         /* 换肤：纯色底或自定义背景图（图存在 IndexedDB 的 bg 键里，meta 只记开关）。 */
-        skin: { mode: 'theme', color: '#fff7e6', image: null },
+        /* 1.7.23：默认改成不透光的黑底（原来跟主题走，暗色主题下那层是半透明的，看着像窗口透明）。 */
+        skin: { mode: 'color', color: '#101010', image: null },
         /* 1.5.1：两种音效的自定义音频（dataURL）；null = 用默认合成音。 */
         sounds: { ding: null, cash: null, ps5: null, stardew: null, mc: null },
         /* 1.7.19（需求）：静音。开着的时候所有音效都不响（含自定义音频与三首成就音）。 */
@@ -1164,6 +1173,14 @@ function tap (fn) {
 
     var flashTimer = null
 
+    /* 1.7.23（需求②）：兑换 / 余额 / 测试这类「单独开的区域」，点一下货架就收回去。 */
+    function closeSideAreas(e) {
+      if (!store.state.panel && !store.state.devOpen) return
+      var t = e && e.target
+      if (t && t.closest && t.closest('button, input, select, textarea, a')) return
+      store.set({ panel: null, devOpen: false })
+    }
+
     function flash(text, tone) {
       if (flashTimer) clearTimeout(flashTimer)
       store.set({ note: { text: text, tone: tone || 'ok', at: Date.now() } })
@@ -1282,6 +1299,8 @@ function tap (fn) {
     var lastSoundKind = ''
     /* 1.7.20：标价 / 数量连续改动时的提示音节流。 */
     var lastDingAt = 0
+    /* 1.7.21：刚框选完的那一下，别让卡片把 click 当成「点菜」。 */
+    var lastMarqueeAt = 0
     function playSound(kind) {
       /* 1.7.10：记下最近一次音效，测试与开发者测试都用得上。 */
       lastSoundKind = kind || ''
@@ -1414,6 +1433,26 @@ function tap (fn) {
       return null
     }
 
+    /* 1.7.23：某个皮肤是不是深色——深色时整套「浅字 + 半透明深底」的规则靠 data-dark=true 生效。 */
+    function lumOf(hex) {
+      var h = String(hex || '').replace('#', '')
+      if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+      if (!/^[0-9a-fA-F]{6}$/.test(h)) return 1
+      function ch (i) {
+        var v = parseInt(h.slice(i, i + 2), 16) / 255
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+      }
+      return 0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4)
+    }
+
+    function isDarkSkin(skin) {
+      var sk = skin || {}
+      if (sk.mode === 'image') return true
+      if (sk.mode === 'color') return lumOf(sk.color) < 0.42
+      /* theme：1.7.23 起也按黑底画，所以算深色。 */
+      return true
+    }
+
     /* ------------------------------------------------------------ 进货 / 换货 */
 
     var addSeq = 0
@@ -1540,6 +1579,44 @@ function tap (fn) {
       })
     }
 
+    /* 1.7.21（需求④）：一键把框选中的商品全部放进「购入美味」。 */
+    function addMarkedToCart() {
+      var st = store.state
+      var marked = st.marked || {}
+      var ids = Object.keys(marked).filter(function (k) { return marked[k] })
+      var hits = st.items.filter(function (it) { return ids.indexOf(it.id) !== -1 && !it.leaving })
+      if (!hits.length) {
+        flash('先在货架上框选要买的商品：在商品上按住拖动也行，空白处起手也行', 'err')
+        return
+      }
+      var next = st.items.map(function (it) {
+        if (ids.indexOf(it.id) === -1 || it.leaving) return it
+        return Object.assign({}, it, { pick: Math.max(1, num(it.pick)) })
+      })
+      store.set({ items: next })
+      playSound('ding')
+      flash('已把 ' + hits.length + ' 件放进「购入美味」；空白处双击取消勾选', 'ok')
+      saveMeta()
+    }
+
+    /* 1.7.21（需求⑤）：把当前货架（或货源视图里）的商品一次全选，再点一次取消。 */
+    function markAllOnShelf() {
+      var st = store.state
+      var list = shelfItems(st).filter(function (it) { return !it.leaving })
+      if (st.searchMode && st.searchMode.ids) {
+        var want = {}
+        st.searchMode.ids.forEach(function (id) { want[id] = true })
+        list = list.filter(function (it) { return want[it.id] })
+      }
+      if (!list.length) { flash('这一页还没有商品', 'err'); return }
+      var allMarked = list.every(function (it) { return !!(st.marked || {})[it.id] })
+      var next = {}
+      if (!allMarked) list.forEach(function (it) { next[it.id] = true })
+      store.set({ marked: next })
+      playSound('ding')
+      flash(allMarked ? '已取消这一页的全选' : '已选中这一页 ' + list.length + ' 件', 'ok')
+    }
+
     function addSample(tag) {
       var st = store.state
       var count = 0
@@ -1597,6 +1674,14 @@ function tap (fn) {
       flash('已手动归到「' + tag + '」货架', 'ok')
     }
 
+    /* 1.7.26：批量操作（清空托盘、点一整份、清一排）只在结束时响一声。
+       把窗口内 setPick 的「叮」压掉，避免 N 件叠成一片噪音。 */
+    var quietUntil = 0
+    function quietly(fn) {
+      quietUntil = Date.now() + 120
+      try { return fn() } finally { quietUntil = 0 }
+    }
+
     function setPick(id, value) {
       var st = store.state
       var before = 0
@@ -1616,8 +1701,9 @@ function tap (fn) {
       if (after === 0) delete seq[id]
       store.set({ items: items, pickSeq: seq, pickTick: tick })
       saveMeta()
-      /* 1.5.2 需求④：点菜的加、减，以及托盘里取消选购，都要「叮」一下。 */
-      if (after !== before) playSound('ding')
+      /* 1.5.2 需求④：点菜的加、减，以及托盘里取消选购，都要「叮」一下。
+         1.7.26：批量操作期间由 quietly() 压住，只在收尾响一声。 */
+      if (after !== before && Date.now() > quietUntil) playSound('ding')
     }
 
     function togglePick(id) {
@@ -2253,9 +2339,18 @@ function tap (fn) {
           .filter(Boolean).join(' ').toLowerCase()
         return hay.indexOf(q) !== -1
       })
+      /* 1.7.21（需求⑦）：不再弹面板等确认，直接跳到货架上的「货源」视图；
+         同名批次（同名不同批）一起捞进来，单独摆在那个虚构标签区里看。 */
+      var names = {}
+      local.forEach(function (it) { names[String(it.displayName || '').toLowerCase()] = true })
+      st.items.forEach(function (it) {
+        if (local.indexOf(it) === -1 && names[String(it.displayName || '').toLowerCase()]) local.push(it)
+      })
+      var ids = local.map(function (it) { return it.id })
       store.set({
-        panel: 'source',
-        sourceResults: { local: local, external: null, loading: sourceProviders.length > 0 }
+        panel: null,
+        sourceResults: { local: local, external: null, loading: sourceProviders.length > 0 },
+        searchMode: q ? { q: String(st.sourceQuery || '').trim(), ids: ids } : null
       })
       if (!sourceProviders.length) return
       Promise.all(sourceProviders.map(function (fn) {
@@ -2541,7 +2636,7 @@ function tap (fn) {
     /* 1.7.15：收起成一条后可能被拖到会话上边栏，那里 DSH 自己的层级比 70 高；
        收起态把整层抬到 2147480500，保证「展开 / 关闭」这些按钮点得到。 */
     '.flb-root[data-mini=true]{z-index:2147480500}',
-      '.flb-window{-webkit-app-region:no-drag;position:absolute;z-index:3;pointer-events:auto;display:flex;flex-direction:column;background:var(--dsw-alias-bg-overlay,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.14));border-radius:16px;box-shadow:0 26px 70px -20px rgba(0,0,0,.5),0 3px 10px rgba(0,0,0,.1);overflow:hidden;font-size:13px;line-height:1.5;--flb-accent:#f59e0b}',
+      '.flb-window{-webkit-app-region:no-drag;position:absolute;z-index:3;pointer-events:auto;display:flex;flex-direction:column;background-color:#121212;background-image:none;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.14));border-radius:16px;box-shadow:0 26px 70px -20px rgba(0,0,0,.5),0 3px 10px rgba(0,0,0,.1);overflow:hidden;font-size:13px;line-height:1.5;--flb-accent:#f59e0b}',
       /* 拖动「购入美味」时铺满整个画面的接收区：盖在窗口上方，
          这样在窗口里手滑松手也算投喂，而不是什么都没发生。 */
       '.flb-catcher{position:fixed;inset:0;z-index:9;pointer-events:auto;cursor:copy;display:flex;align-items:center;justify-content:center;background:rgba(245,158,11,.1);outline:2px dashed var(--dsw-alias-brand-primary,#4f7cff);outline-offset:-10px}',
@@ -2609,6 +2704,28 @@ function tap (fn) {
       '.flb-sets-main{flex:1 1 auto;min-width:0;overflow:auto;padding-right:2px}',
       '.flb-sets-hint{font-size:12.5px;color:var(--dsw-alias-label-secondary);padding:16px 4px}',
       '.flb-sets-rail{flex:0 0 clamp(292px, 36%, 520px);display:flex;flex-direction:column;gap:8px;align-self:stretch;min-height:0}',
+      /* 1.7.21（需求⑧）：滚动条加宽加亮。 */
+      '.flb-body{scrollbar-width:thin;scrollbar-color:#d8a63e rgba(0,0,0,.08)}',
+      '.flb-body::-webkit-scrollbar{width:13px;height:13px}',
+      '.flb-body::-webkit-scrollbar-track{background:rgba(0,0,0,.06);border-radius:7px}',
+      '.flb-body::-webkit-scrollbar-thumb{background:#d8a63e;border-radius:7px;border:2px solid transparent;background-clip:padding-box}',
+      '.flb-body::-webkit-scrollbar-thumb:hover{background:#f0bd55;background-clip:padding-box}',
+      /* 1.7.21（需求②）：货架里框选时不连带选字。 */
+      '.flb-marquee-host{-webkit-user-select:none;user-select:none}',
+      /* 1.7.21（需求①）：套餐份数改成可手填的输入框。 */
+      '.flb-set-qty{width:40px;padding:0;border:0;background:transparent;color:inherit;font-family:inherit;font-size:12px;font-weight:800;text-align:center;outline:none}',
+      '.flb-set-qty::-webkit-outer-spin-button,.flb-set-qty::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}',
+      /* 1.7.21（需求③）：往下接着渲染的入口。 */
+      '.flb-more-wrap{display:flex;flex-direction:column;align-items:center;gap:4px;padding:14px 0 6px}',
+      '.flb-more-hint{font-size:10.5px;color:var(--dsw-alias-label-secondary,#7a6a4f)}',
+      /* 1.7.21（需求⑦）：货源视图的抬头。 */
+      '.flb-src-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;border-radius:10px;border:1px dashed var(--dsw-alias-brand-primary,#f59e0b);background:rgba(245,158,11,.1);font-size:12px}',
+      '.flb-src-tag{display:inline-flex;align-items:center;height:19px;padding:0 7px;border-radius:6px;background:#f59e0b;color:#fff;font-weight:800;font-size:10.5px}',
+      '.flb-src-n{color:var(--dsw-alias-label-secondary,#7a6a4f)}',
+      /* 1.7.22：渲染兜底的红条。 */
+      '.flb-crash{margin:10px 12px;padding:10px 12px;border-radius:11px;border:1px solid rgba(190,32,32,.55);background:rgba(190,32,32,.12);color:#8f1d1d;font-size:12px;display:flex;flex-direction:column;gap:6px}',
+      '.flb-crash b{font-size:12.5px}',
+      '.flb-crash p{margin:0;word-break:break-word;opacity:.8}',
       '.flb-set-box{flex:1 1 0;min-height:152px;display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;padding:8px 9px;background:var(--dsw-alias-bg-layer-1)}',
       '.flb-set-box-head{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:700;margin-bottom:6px;flex:0 0 auto}',
       '.flb-set-box-n{font-size:10.5px;font-weight:500;color:var(--dsw-alias-label-secondary)}',
@@ -2631,10 +2748,10 @@ function tap (fn) {
       '.flb-set-cancel{flex:0 0 auto;height:24px;padding:0 7px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:transparent;color:inherit;font-size:11px;cursor:pointer;opacity:.8}',
       '.flb-set-dice{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:7px 8px;border-radius:10px;border:1px dashed var(--dsw-alias-brand-primary,#f59e0b);background:rgba(245,158,11,.12);color:var(--dsw-alias-label-primary);font-size:11.5px;font-weight:700;cursor:pointer}',
       '.flb-set-dice:hover{background:rgba(245,158,11,.24)}',
-      '[data-skin=image] .flb-set-box{background:rgba(18,14,10,.66);border-color:rgba(255,255,255,.16);color:#f4efe4}',
-      '[data-skin=image] .flb-set-box-n,[data-skin=image] .flb-set-empty{color:rgba(246,241,230,.74)}',
-      '[data-skin=image] .flb-set-dice{color:#f6f1e6}',
-      '[data-skin=image] .flb-set-name{color:rgba(246,241,230,.72)}',
+      '[data-dark=true] .flb-set-box{background:rgba(18,14,10,.66);border-color:rgba(255,255,255,.16);color:#f4efe4}',
+      '[data-dark=true] .flb-set-box-n,[data-dark=true] .flb-set-empty{color:rgba(246,241,230,.74)}',
+      '[data-dark=true] .flb-set-dice{color:#f6f1e6}',
+      '[data-dark=true] .flb-set-name{color:rgba(246,241,230,.72)}',
       '.flb-groups{display:flex;flex-direction:column;gap:14px}',
       '.flb-group{border-left:2px solid rgba(245,158,11,.4);padding-left:10px}',
       '.flb-group-head{display:flex;align-items:center;gap:8px;margin:0 2px 8px;font-size:11.5px;color:var(--dsw-alias-label-secondary)}',
@@ -2693,7 +2810,7 @@ function tap (fn) {
     '.flb-head-center{flex:0 1 auto;min-width:30px;max-width:none;margin:0 4px;overflow:hidden;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 10px;border-radius:999px;border:1px dashed var(--dsw-alias-border-l2);background:rgba(245,158,11,.14);color:inherit;font-family:inherit;font-size:12px;font-weight:650;cursor:pointer;overflow:hidden;white-space:nowrap}',
       '.flb-head-center:hover{background:rgba(245,158,11,.24)}',
       '.flb-head-center span{overflow:hidden;text-overflow:ellipsis}',
-      '.flb-window[data-skin=image] .flb-head-center{background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.34);color:#fff}',
+      '.flb-window[data-dark=true] .flb-head-center{background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.34);color:#fff}',
       '.flb-pack-tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:0 12px 8px}',
       '.flb-sound-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 11px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);margin-bottom:8px}',
       '.flb-sound-main{flex:1 1 220px;display:flex;flex-direction:column;gap:2px;min-width:0}',
@@ -2851,15 +2968,15 @@ function tap (fn) {
       '.flb-foot-num{display:flex;align-items:baseline;gap:2px;font-weight:800;font-size:26px;line-height:1.05;color:#7c3f00;font-variant-numeric:tabular-nums}',
       '.flb-foot-unit{font-size:12px;font-weight:700;opacity:.72;letter-spacing:.04em}',
       /* 边框拉伸手柄：窗口有 overflow:hidden，所以全部贴内侧、只占 6px。 */
-      '.flb-rs{position:absolute;z-index:12}',
-      '.flb-rs-n{top:0;left:12px;right:12px;height:6px;cursor:ns-resize}',
-      '.flb-rs-s{bottom:0;left:12px;right:12px;height:6px;cursor:ns-resize}',
-      '.flb-rs-w{left:0;top:12px;bottom:12px;width:6px;cursor:ew-resize}',
-      '.flb-rs-e{right:0;top:12px;bottom:12px;width:6px;cursor:ew-resize}',
-      '.flb-rs-nw{left:0;top:0;width:13px;height:13px;cursor:nwse-resize}',
-      '.flb-rs-ne{right:0;top:0;width:13px;height:13px;cursor:nesw-resize}',
-      '.flb-rs-sw{left:0;bottom:0;width:13px;height:13px;cursor:nesw-resize}',
-      '.flb-rs-se{right:0;bottom:0;width:15px;height:15px;cursor:nwse-resize}',
+      '.flb-rs{position:absolute;z-index:40;pointer-events:auto}',
+      '.flb-rs-n{top:0;left:14px;right:14px;height:8px;cursor:ns-resize}',
+      '.flb-rs-s{bottom:0;left:14px;right:14px;height:8px;cursor:ns-resize}',
+      '.flb-rs-w{left:0;top:14px;bottom:14px;width:8px;cursor:ew-resize}',
+      '.flb-rs-e{right:0;top:14px;bottom:14px;width:8px;cursor:ew-resize}',
+      '.flb-rs-nw{left:0;top:0;width:16px;height:16px;cursor:nwse-resize}',
+      '.flb-rs-ne{right:0;top:0;width:16px;height:16px;cursor:nesw-resize}',
+      '.flb-rs-sw{left:0;bottom:0;width:16px;height:16px;cursor:nesw-resize}',
+      '.flb-rs-se{right:0;bottom:0;width:18px;height:18px;cursor:nwse-resize}',
       '.flb-rs-se::after{content:"";position:absolute;right:3px;bottom:3px;width:7px;height:7px;border-right:2px solid rgba(120,90,20,.5);border-bottom:2px solid rgba(120,90,20,.5);border-radius:0 0 3px 0}',
       '.flb-window[data-resizing=true]{user-select:none}',
       /* 换肤：纯色或背景图。内容区自带底色，图不会被文字吃掉。 */
@@ -2880,10 +2997,10 @@ function tap (fn) {
       '.flb-coupon-box-title{font-size:11px;font-weight:700;opacity:.72;margin-right:2px}',
       '.flb-foot-btn.flb-dev-toggle.flb-btn-on{background:rgba(245,158,11,.3);border-color:rgba(217,119,6,.6)}',
       '.flb-dev-sheet{position:absolute;left:12px;right:12px;bottom:54px;z-index:14;padding:10px 12px;border-radius:13px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,#fffdf3);box-shadow:0 20px 44px -20px rgba(0,0,0,.55);max-height:56%;overflow:auto}',
-      '.flb-window[data-skin=image] .flb-dev-sheet{background:rgba(24,19,13,.94);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-dev-sheet{background:rgba(24,19,13,.94);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
       /* 1.7.2（需求③）：兑换 / 余额面板也贴窗口底部展开，跟测试面板同一位置。 */
       '.flb-panel.flb-panel-bottom{position:absolute;left:12px;right:12px;bottom:54px;z-index:15;margin:0;max-height:64%;padding:10px 12px;border-radius:13px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,#fffdf3);box-shadow:0 20px 44px -20px rgba(0,0,0,.55);overflow:auto}',
-      '.flb-window[data-skin=image] .flb-panel.flb-panel-bottom{background:rgba(24,19,13,.94);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-panel.flb-panel-bottom{background:rgba(24,19,13,.94);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
       '.flb-field input::-webkit-outer-spin-button,.flb-field input::-webkit-inner-spin-button{-webkit-appearance:none;appearance:none;margin:0}',
       '.flb-dev-head{display:flex;align-items:center;gap:6px;font-weight:800;font-size:12.5px;margin-bottom:6px}',
       '.flb-dev-head .flb-icon-btn{margin-left:auto}',
@@ -2914,35 +3031,35 @@ function tap (fn) {
       '.flb-map-set{display:inline-flex;align-items:center;gap:4px;cursor:pointer}',
       '.flb-group-row{display:flex;align-items:center;gap:6px;margin-top:6px}',
       '.flb-group-name{flex:1 1 auto}',
-      '.flb-window[data-skin=image] .flb-balance-big b{color:#f6f1e6}',
-      '.flb-window[data-skin=color]{background:var(--flb-skin,#fff7e6)}',
-      '.flb-window[data-skin=image]{background:#3a3a3a var(--flb-skin-image) center/cover no-repeat}',
-      '.flb-window[data-skin=image] .flb-head,.flb-window[data-skin=image] .flb-foot{background:rgba(20,16,10,.62);color:#f5efe2}',
-      '.flb-window[data-skin=image] .flb-title{color:#fff}',
+      '.flb-window[data-dark=true] .flb-balance-big b{color:#f6f1e6}',
+      '.flb-window[data-skin=color]{background-color:var(--flb-skin,#101010);background-image:none}',
+      '.flb-window[data-skin=image]{background-color:#121212;background-image:var(--flb-skin-image);background-position:center;background-size:cover;background-repeat:no-repeat}',
+      '.flb-window[data-dark=true] .flb-head,.flb-window[data-dark=true] .flb-foot{background:rgba(20,16,10,.62);color:#f5efe2}',
+      '.flb-window[data-dark=true] .flb-title{color:#fff}',
       /* 货架区（1.3.1）：图模式下整块改成深色半透明，别用白底把背景图糊掉。 */
-      '.flb-window[data-skin=image] .flb-tabs,.flb-window[data-skin=image] .flb-toolbar{background:rgba(18,14,10,.34);border-color:rgba(255,255,255,.14)}',
-      '.flb-window[data-skin=image] .flb-body{background:rgba(14,11,8,.46);color:#f4efe4}',
-      '.flb-window[data-skin=image] .flb-tray{background:rgba(18,14,10,.72);border-color:rgba(255,255,255,.14)}',
-      '.flb-window[data-skin=image] .flb-card{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.16);color:#f6f1e6}',
-      '.flb-window[data-skin=image] .flb-card:hover{box-shadow:0 10px 22px -12px rgba(0,0,0,.7)}',
-      '.flb-window[data-skin=image] .flb-name,.flb-window[data-skin=image] .flb-empty h3,.flb-window[data-skin=image] .flb-group-key{color:#fff}',
-      '.flb-window[data-skin=image] .flb-sub,.flb-window[data-skin=image] .flb-tiny,.flb-window[data-skin=image] .flb-meta,.flb-window[data-skin=image] .flb-group-head,.flb-window[data-skin=image] .flb-empty{color:rgba(246,241,230,.74)}',
-      '.flb-window[data-skin=image] .flb-body .flb-btn:not(.flb-primary){background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-tabs,.flb-window[data-dark=true] .flb-toolbar{background:rgba(18,14,10,.34);border-color:rgba(255,255,255,.14)}',
+      '.flb-window[data-dark=true] .flb-body{background:rgba(14,11,8,.46);color:#f4efe4}',
+      '.flb-window[data-dark=true] .flb-tray{background:rgba(18,14,10,.72);border-color:rgba(255,255,255,.14)}',
+      '.flb-window[data-dark=true] .flb-card{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.16);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-card:hover{box-shadow:0 10px 22px -12px rgba(0,0,0,.7)}',
+      '.flb-window[data-dark=true] .flb-name,.flb-window[data-dark=true] .flb-empty h3,.flb-window[data-dark=true] .flb-group-key{color:#fff}',
+      '.flb-window[data-dark=true] .flb-sub,.flb-window[data-dark=true] .flb-tiny,.flb-window[data-dark=true] .flb-meta,.flb-window[data-dark=true] .flb-group-head,.flb-window[data-dark=true] .flb-empty{color:rgba(246,241,230,.74)}',
+      '.flb-window[data-dark=true] .flb-body .flb-btn:not(.flb-primary){background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2);color:#f6f1e6}',
       /* 需求③：钱包 / 说明这两块详情面板原来继承浅色底，浅色背景图下读不清；改成和托盘同款的深色。 */
-      '.flb-window[data-skin=image] .flb-sheet-card{background:rgba(18,14,10,.72);border-color:rgba(255,255,255,.16);color:#f4efe4}',
-      '.flb-window[data-skin=image] .flb-sheet-card .flb-tiny,.flb-window[data-skin=image] .flb-sheet-card p{color:rgba(246,241,230,.78)}',
-      '.flb-window[data-skin=image] .flb-panel{background:rgba(18,14,10,.72);border-bottom-color:rgba(255,255,255,.14);color:#f4efe4}',
-      '.flb-window[data-skin=image] .flb-panel p,.flb-window[data-skin=image] .flb-panel-row,.flb-window[data-skin=image] .flb-help-row,.flb-window[data-skin=image] .flb-hist-row{color:rgba(246,241,230,.82);border-top-color:rgba(255,255,255,.14)}',
-      '.flb-window[data-skin=image] .flb-help-k,.flb-window[data-skin=image] .flb-panel-head,.flb-window[data-skin=image] .flb-stat b{color:#fff}',
-      '.flb-window[data-skin=image] .flb-stat{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16)}',
-      '.flb-window[data-skin=image] .flb-panel .flb-btn:not(.flb-primary){background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2);color:#f6f1e6}',
-      '.flb-window[data-skin=image] .flb-tab{color:rgba(246,241,230,.72)}',
-      '.flb-window[data-skin=image] .flb-tab[data-active=true]{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.2);color:#fff}',
-      '.flb-window[data-skin=image] .flb-fontscale b,.flb-window[data-skin=image] .flb-fontscale button{color:#f6f1e6}',
-      '.flb-window[data-skin=image] .flb-ring-pct{color:#f6f1e6}',
-      '.flb-window[data-skin=image] .flb-foot-money{background:rgba(45,212,191,.18);border-color:rgba(45,212,191,.6)}',
-      '.flb-window[data-skin=image] .flb-foot-money .flb-foot-num{color:#a7f3d0}',
-      '.flb-window[data-skin=image] .flb-thumb-wrap{background:transparent}',
+      '.flb-window[data-dark=true] .flb-sheet-card{background:rgba(18,14,10,.72);border-color:rgba(255,255,255,.16);color:#f4efe4}',
+      '.flb-window[data-dark=true] .flb-sheet-card .flb-tiny,.flb-window[data-dark=true] .flb-sheet-card p{color:rgba(246,241,230,.78)}',
+      '.flb-window[data-dark=true] .flb-panel{background:rgba(18,14,10,.72);border-bottom-color:rgba(255,255,255,.14);color:#f4efe4}',
+      '.flb-window[data-dark=true] .flb-panel p,.flb-window[data-dark=true] .flb-panel-row,.flb-window[data-dark=true] .flb-help-row,.flb-window[data-dark=true] .flb-hist-row{color:rgba(246,241,230,.82);border-top-color:rgba(255,255,255,.14)}',
+      '.flb-window[data-dark=true] .flb-help-k,.flb-window[data-dark=true] .flb-panel-head,.flb-window[data-dark=true] .flb-stat b{color:#fff}',
+      '.flb-window[data-dark=true] .flb-stat{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16)}',
+      '.flb-window[data-dark=true] .flb-panel .flb-btn:not(.flb-primary){background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.2);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-tab{color:rgba(246,241,230,.72)}',
+      '.flb-window[data-dark=true] .flb-tab[data-active=true]{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.2);color:#fff}',
+      '.flb-window[data-dark=true] .flb-fontscale b,.flb-window[data-dark=true] .flb-fontscale button{color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-ring-pct{color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-foot-money{background:rgba(45,212,191,.18);border-color:rgba(45,212,191,.6)}',
+      '.flb-window[data-dark=true] .flb-foot-money .flb-foot-num{color:#a7f3d0}',
+      '.flb-window[data-dark=true] .flb-thumb-wrap{background:transparent}',
       '.flb-skin-grid{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}',
       '.flb-swatch{width:34px;height:34px;border-radius:9px;border:2px solid rgba(0,0,0,.14);cursor:pointer;padding:0}',
       '.flb-swatch[data-on=true]{border-color:#f59e0b;box-shadow:0 0 0 2px rgba(245,158,11,.3)}',
@@ -2956,7 +3073,7 @@ function tap (fn) {
       '.flb-pop-note{position:fixed;z-index:2147483300;pointer-events:none;transform:translateX(-50%);display:flex;justify-content:center}',
       '.flb-pop-note .flb-toast{position:static;left:auto;bottom:auto;transform:none;max-width:min(520px,86vw)}',
       '.flb-pop-card{pointer-events:auto;max-height:54vh;overflow:auto;padding:10px 12px;border-radius:13px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,#fffdf3);box-shadow:0 20px 44px -20px rgba(0,0,0,.55);font-size:11.5px}',
-      '.flb-window[data-skin=image] .flb-pop-card{background:rgba(24,19,13,.96);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
+      '.flb-window[data-dark=true] .flb-pop-card{background:rgba(24,19,13,.96);border-color:rgba(255,255,255,.18);color:#f6f1e6}',
       '.flb-pop-card .flb-dev-sheet,.flb-pop-card .flb-panel-bottom{position:static;left:auto;right:auto;bottom:auto;max-height:none;margin:0;padding:0;border:0;background:transparent;box-shadow:none;overflow:visible}',
       '.flb-toast{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);padding:7px 14px;border-radius:10px;font-size:12px;background:rgba(24,20,14,.9);color:#fff;z-index:30;max-width:78%;text-align:center;animation:flb-pop .18s ease;box-shadow:0 8px 24px -10px rgba(0,0,0,.6)}',
       '.flb-toast[data-tone=err]{background:#8f1d1d}',
@@ -4480,34 +4597,53 @@ function tap (fn) {
       var setRect = pair[1]
       function onDown (e) {
         if (e.button !== undefined && e.button !== 0) return
-        /* 1.7.20：点卡片 / 按钮 / 面板时不该进框选——原来每次按下都会
-           querySelectorAll + 逐个 getBoundingClientRect，几百件就是一次强制布局。 */
+        /* 1.7.21（需求②④）：真控件上不起框选，商品框上可以（任意位置起手）；
+           按下就 preventDefault，免得把卡片上的名字一起抹成蓝色文本。 */
         var tg = e.target
-        if (tg && tg.closest && tg.closest('.flb-card, button, input, select, textarea, a, .flb-sets-rail, .flb-tray')) return
+        if (tg && tg.closest && tg.closest('button, input, select, textarea, a, .flb-sets-rail, .flb-tray, .flb-toolbar')) return
+        if (e.preventDefault) e.preventDefault()
         var host = e.currentTarget
-        var box = host.getBoundingClientRect()
+        var scroller = host.closest ? host.closest('.flb-body') : null
+        var startScroll = scroller ? scroller.scrollTop : 0
+        var startScrollL = scroller ? scroller.scrollLeft : 0
         var sx = e.clientX
         var sy = e.clientY
         var moved = false
+        var curY = sy
         var cards = Array.prototype.slice.call(host.querySelectorAll('.flb-card[data-id]')).map(function (node) {
           return { id: node.getAttribute('data-id'), r: node.getBoundingClientRect() }
         })
         var rafId = 0
         var next = null
+        /* 框本身要相对 host 现在的位置画——滚动时 host 会跟着走。 */
         function paint() {
           rafId = 0
-          if (next) setRect(next)
+          if (!next) return
+          var b = host.getBoundingClientRect()
+          setRect({ x: next.x - b.left, y: next.y - b.top, w: next.w, h: next.h })
+        }
+        /* 需求④：拖到上下边缘时自动滚，能一路框到屏幕外的商品。 */
+        function autoScroll() {
+          if (!scroller) return
+          var b = scroller.getBoundingClientRect()
+          var edge = 44
+          var dy = 0
+          if (curY < b.top + edge) dy = -Math.ceil((b.top + edge - curY) / 3)
+          else if (curY > b.bottom - edge) dy = Math.ceil((curY - (b.bottom - edge)) / 3)
+          if (!dy) return
+          scroller.scrollTop = scroller.scrollTop + dy
         }
         function onMove (ev) {
-          var x = Math.min(sx, ev.clientX) - box.left
-          var y = Math.min(sy, ev.clientY) - box.top
+          curY = ev.clientY
           var w = Math.abs(ev.clientX - sx)
           var hh = Math.abs(ev.clientY - sy)
           if (w > 5 || hh > 5) moved = true
-          next = { x: x, y: y, w: w, h: hh }
-          if (rafId) return
-          if (typeof window.requestAnimationFrame === 'function') rafId = window.requestAnimationFrame(paint)
-          else paint()
+          next = { x: Math.min(sx, ev.clientX), y: Math.min(sy, ev.clientY), w: w, h: hh }
+          if (!rafId) {
+            if (typeof window.requestAnimationFrame === 'function') rafId = window.requestAnimationFrame(paint)
+            else paint()
+          }
+          autoScroll()
         }
         function onUp (ev) {
           document.removeEventListener('mousemove', onMove, true)
@@ -4516,12 +4652,18 @@ function tap (fn) {
           next = null
           setRect(null)
           if (!moved) return
+          /* 卡片是在按下那一刻量的（视口坐标）；滚动过的话整体平移 scrollTop 的差值。 */
+          var dy = (scroller ? scroller.scrollTop : 0) - startScroll
+          var dx = (scroller ? scroller.scrollLeft : 0) - startScrollL
           var x1 = Math.min(sx, ev.clientX), y1 = Math.min(sy, ev.clientY)
           var x2 = Math.max(sx, ev.clientX), y2 = Math.max(sy, ev.clientY)
+          lastMarqueeAt = Date.now()
           var hit = cards.filter(function (c) {
-            return !(c.r.right < x1 || c.r.left > x2 || c.r.bottom < y1 || c.r.top > y2)
+            var l = c.r.left - dx, t = c.r.top - dy
+            var r = c.r.right - dx, b = c.r.bottom - dy
+            return !(r < x1 || l > x2 || b < y1 || t > y2)
           })
-          if (!hit.length) return
+          if (!hit.length) { flash('这一框里没有商品：在空白处双击可以取消勾选', 'ok'); return }
           var marked = Object.assign({}, store.state.marked)
           hit.forEach(function (c) { marked[c.id] = true })
           store.set({ marked: marked })
@@ -4768,7 +4910,11 @@ function tap (fn) {
           title: (it.gif ? '动图（GIF 会自己播）\n' : '') + '拖动可调整摆放顺序；点一下是点菜' + (it.tagFrom === 'manual' ? '\n标签：手动归到「' + it.tag + '」' : '') + (it.origin ? '\n来源：' + it.origin : ''),
           onDragStart: onThumbDragStart,
           onDragEnd: onThumbDragEnd,
-          onClick: function () { togglePick(it.id) }
+          onClick: function () {
+            /* 1.7.21：刚框选完松手时浏览器还会补一个 click，别顺手把它点成「点菜」。 */
+            if (Date.now() - lastMarqueeAt < 160) return
+            togglePick(it.id)
+          }
         },
           url
             ? h('img', {
@@ -4872,17 +5018,119 @@ function tap (fn) {
       )
     }
 
+    /* 1.7.22：兜底边界。槽位里任何一个组件抛错，DSH 会把整块卸载（窗口就消失了），
+       这里自己接住，显示一条红字并提供「再试一次」。只有真 React 有 Component 时才启用，
+       离线测试的 shim 里会退化成直通。 */
+    var Safety = null
+    if (typeof React.Component === 'function') {
+      Safety = (function () {
+        function S (props) {
+          React.Component.call(this, props)
+          this.state = { err: null }
+          this.retry = this.retry.bind(this)
+        }
+        S.prototype = Object.create(React.Component.prototype)
+        S.prototype.constructor = S
+        S.getDerivedStateFromError = function (err) {
+          return { err: (err && err.message) || String(err) }
+        }
+        S.prototype.componentDidCatch = function (err) {
+          try { diag('render-error', { message: String((err && err.message) || err) }) } catch (e) {}
+        }
+        S.prototype.retry = function () { this.setState({ err: null }) }
+        S.prototype.render = function () {
+          if (!this.state.err) return this.props.children || null
+          return h('div', { className: 'flb-crash' },
+            h('b', null, '这块内容渲染出错了（其它功能还在）'),
+            h('p', null, String(this.state.err)),
+            h('button', { type: 'button', className: 'flb-btn flb-small', onClick: this.retry }, '再试一次'))
+        }
+        return S
+      })()
+    }
+
+    function safe (node) { return Safety ? h(Safety, null, node) : node }
+
+    /* 1.7.21（需求③）：一屏一屏地渲染，而不是每次切货架把全部商品挂上去。
+       开场只挂 PAGE_SIZE 件，滚到底部附近再接着往下挂；换货架 / 换排法 / 改规格
+       会从头开始，不会停在上一页的半截。 */
+    var PAGE_SIZE = 48
+
     function ShelfBody() {
       var st = useStore()
       var mq = useMarquee()
-      var items = shelfItems(st, true)
-      if (!items.length) return h(EmptyShelf, { tag: activeTag(st), overview: isOverview(st.tab) })
+      var all = shelfItems(st, true)
+
+      /* 货源视图：查询直接跳到这儿，只摆命中的那几件（含同名批次）。 */
+      var pool = all
+      if (st.searchMode && st.searchMode.ids) {
+        var want = {}
+        st.searchMode.ids.forEach(function (id) { want[id] = true })
+        pool = all.filter(function (it) { return want[it.id] })
+      }
+
+      /* 1.7.22：hook 必须无条件调用 —— 1.7.21 把这三个 hook 放在「空货架提前 return」之后，
+         空货架第一次渲染不调 hook、上传完突然调，React 直接抛
+         "Rendered more hooks than during the previous render"，
+         槽位整块崩掉（窗口消失、心跳还在跑），这就是「上传后窗口不见了」的根因。 */
+      var pair = React.useState(PAGE_SIZE)
+      var limit = num(pair[0]) || PAGE_SIZE
+      var setLimit = pair[1]
+      var more = pool.length > limit
+      var items = more ? pool.slice(0, limit) : pool
+      var needle = React.useRef(null)
+      var resetKey = st.tab + '|' + st.arrange + '|' + (st.cardScale || 'large') + '|' + (st.searchMode ? st.searchMode.q : '')
+
+      React.useEffect(function () {
+        setLimit(PAGE_SIZE)
+      }, [resetKey])
+
+      React.useEffect(function () {
+        var node = needle.current
+        if (!node || typeof IntersectionObserver === 'undefined') return
+        var root = node.closest ? node.closest('.flb-body') : null
+        var io = new IntersectionObserver(function (rows) {
+          if (rows && rows[0] && rows[0].isIntersecting) setLimit(limit + PAGE_SIZE)
+        }, { root: root, rootMargin: '320px 0px' })
+        io.observe(node)
+        return function () { io.disconnect() }
+      }, [more, limit])
+
+      /* 空态放在所有 hook 之后：钩子顺序必须每次渲染都一样。 */
+      if (!all.length) return h(EmptyShelf, { tag: activeTag(st), overview: isOverview(st.tab) })
+
+      function tail() {
+        if (!more) return null
+        return h('div', { className: 'flb-more-wrap', ref: needle },
+          h('button', {
+            type: 'button', className: 'flb-btn flb-more',
+            onClick: function () { setLimit(limit + PAGE_SIZE) }
+          }, '继续往下看（还有 ' + (pool.length - limit) + ' 件）'),
+          h('span', { className: 'flb-more-hint' }, '上下滚动会自动接着渲染'))
+      }
+
+      function srcHead() {
+        if (!st.searchMode) return null
+        return h('div', { className: 'flb-src-head' },
+          h('span', { className: 'flb-src-tag' }, '货源'),
+          h('b', null, '「' + String(st.searchMode.q || '') + '」'),
+          h('span', { className: 'flb-src-n' }, pool.length + ' 件（含同名批次）'),
+          h('button', {
+            type: 'button', className: 'flb-btn flb-small',
+            title: '退出货源视图，回到原来的货架',
+            onClick: function () { store.set({ searchMode: null, sourceResults: null }) }
+          }, '退出查询'))
+      }
+
+      var marqueeNode = mq.rect ? h('div', { className: 'flb-marquee', style: { left: mq.rect.x + 'px', top: mq.rect.y + 'px', width: mq.rect.w + 'px', height: mq.rect.h + 'px' } }) : null
+      var hostProps = { className: 'flb-marquee-host', onDoubleClick: mq.onDblClick, onMouseDown: mq.onDown }
+
       /* 总览页：不管现在选了哪种排法，都按标签分堆——不然九个货架的东西混在一起找不着。 */
-      if (isOverview(st.tab)) {
+      if (isOverview(st.tab) && !st.searchMode) {
         var per = TAGS.map(function (t) {
           return { tag: t, items: items.filter(function (it) { return it.tag === t.key }) }
         }).filter(function (g) { return g.items.length })
-        return h('div', { className: 'flb-marquee-host', onDoubleClick: mq.onDblClick, onMouseDown: mq.onDown }, h('div', { className: 'flb-groups' },
+        return h('div', hostProps, h('div', { className: 'flb-groups' },
           per.map(function (g) {
             return h('section', { className: 'flb-group', key: g.tag.key },
               h('div', { className: 'flb-group-head' },
@@ -4893,12 +5141,15 @@ function tap (fn) {
               h('div', { className: 'flb-grid' },
                 g.items.map(function (it) { return h(ItemCardMemo, cardProps(it, st)) }))
             )
-          })),
-          mq.rect ? h('div', { className: 'flb-marquee', style: { left: mq.rect.x + 'px', top: mq.rect.y + 'px', width: mq.rect.w + 'px', height: mq.rect.h + 'px' } }) : null
-        )
+          }),
+          tail(),
+          marqueeNode
+        ))
       }
+
       var groups = arrangeItems(items, st.arrange)
-      return h('div', { className: 'flb-marquee-host', onDoubleClick: mq.onDblClick, onMouseDown: mq.onDown }, h('div', { className: 'flb-groups' },
+      return h('div', hostProps, h('div', { className: 'flb-groups' },
+        srcHead(),
         groups.map(function (g) {
           return h('section', { className: 'flb-group' + (g.key ? '' : ' flb-group-flat'), key: g.key || 'default' },
             g.key
@@ -4909,9 +5160,10 @@ function tap (fn) {
             h('div', { className: 'flb-grid' },
               g.items.map(function (it) { return h(ItemCardMemo, cardProps(it, st)) }))
           )
-        })),
-        mq.rect ? h('div', { className: 'flb-marquee', style: { left: mq.rect.x + 'px', top: mq.rect.y + 'px', width: mq.rect.w + 'px', height: mq.rect.h + 'px' } }) : null
-      )
+        }),
+        tail(),
+        marqueeNode
+      ))
     }
 
     /* 1.6.3：套餐页的随机组合。池子是「前面所有标签」的素材，先洗牌再依次切 2/3/4，
@@ -4932,7 +5184,8 @@ function tap (fn) {
       var ids = (store.state.sets || [])[index] || []
       if (!ids.length) { flash('这一份还没凑齐，先掷一下骰子', 'err'); return }
       var n = Math.max(1, Math.min(MAX_PICK, num(qty)))
-      ids.forEach(function (id) { setPick(id, n) })
+      quietly(function () { ids.forEach(function (id) { setPick(id, n) }) })
+      playSound('ding')
       flash('已点这一份：' + ids.length + ' 件 × ' + n + ' 份', 'ok')
     }
 
@@ -4943,7 +5196,10 @@ function tap (fn) {
     }
 
     function clearSet(index) {
-      ((store.state.sets || [])[index] || []).forEach(function (id) { setPick(id, 0) })
+      var ids = (store.state.sets || [])[index] || []
+      if (!ids.length) return
+      quietly(function () { ids.forEach(function (id) { setPick(id, 0) }) })
+      playSound('ding')
     }
 
     /* 点右侧缩略图 = 给这件点 1 份（顺手进「购入美味」）。 */
@@ -4957,7 +5213,7 @@ function tap (fn) {
     function rollSets(quiet) {
       var pool = store.state.items.filter(function (it) { return !it.leaving && inSets(it.tag) })
       if (!pool.length) {
-        if (!quiet) flash('货架还空着：先拖几张图进货，或点「示例一件」', 'err')
+        if (!quiet) flash('货架还空着：把图片拖进窗口，或点标题栏「上传您准备的美食包」', 'err')
         return
       }
       var bag = shuffled(pool)
@@ -5026,7 +5282,16 @@ function tap (fn) {
                 disabled: qty <= 1 ? 'disabled' : undefined,
                 onClick: function () { setSetQty(i, qty - 1) }
               }, '−'),
-              h('b', { className: 'flb-set-qty' }, String(qty)),
+              /* 1.7.21（需求①）：份数除了加减，也能直接手填。 */
+              h('input', {
+                className: 'flb-set-qty',
+                type: 'number',
+                min: '1',
+                max: String(MAX_PICK),
+                value: String(qty),
+                title: '这一套每件的份数：可以直接填',
+                onChange: function (e) { setSetQty(i, num(e.target.value)) }
+              }),
               h('button', {
                 type: 'button', className: 'flb-set-plus',
                 title: qty >= MAX_PICK ? '一次最多 ' + MAX_PICK + ' 份' : '这套多一份',
@@ -5137,7 +5402,8 @@ function tap (fn) {
           h('button', {
             className: 'flb-btn flb-ghost',
             onClick: function () {
-              picked.forEach(function (it) { setPick(it.id, 0) })
+              /* 1.7.26：多件一起清，只响一声。 */
+              quietly(function () { picked.forEach(function (it) { setPick(it.id, 0) }) })
               playSound('ding')
             }
           }, '清空'),
@@ -5203,11 +5469,12 @@ function tap (fn) {
           title: '选图片进货（也可以直接把图片拖进这扇窗）',
           onClick: function () { playSound('ding'); requestFiles() }
         }, h(IconPlus, { size: 14 }), '进货'),
+        /* 1.7.21（需求④）：这一格原来是「加一件示例」，现在改成「放入购物车」。 */
         h('button', {
           className: 'flb-btn',
-          title: '不用准备图片：用「' + tag.key + '」的矢量图标生成一件示例素材',
-          onClick: function () { addSample(activeTag()) }
-        }, h(IconSpark, { size: 13 }), '示例一件'),
+          title: '把框选中的商品一键放进「购入美味」（空白处双击取消勾选）',
+          onClick: function () { addMarkedToCart() }
+        }, h(IconDrop, { size: 13 }), '放入购物车'),
         h('div', { className: 'flb-seg' },
           h('span', { className: 'flb-seg-label' }, h(IconSort, { size: 12 }), '排货'),
           ARRANGES.map(function (a) {
@@ -5225,6 +5492,12 @@ function tap (fn) {
             }, label)
           })
         ),
+        /* 1.7.21（需求⑤）：换货左边加「全选」，一次把这一页全勾上（再点取消）。 */
+        h('button', {
+          className: 'flb-btn',
+          title: '全选这一页的商品（再点一次取消全选）',
+          onClick: function () { markAllOnShelf() }
+        }, h(IconCheck, { size: 13 }), '全选'),
         h('button', {
           className: 'flb-btn' + (st.panel === 'change' ? ' flb-btn-on' : ''),
           title: '换货：清理右上角勾选的素材，或把新图拖到某件素材上替换它',
@@ -5236,14 +5509,14 @@ function tap (fn) {
           className: 'flb-btn',
           title: '按当前的判定规则重新识别一遍文件名并重排货架（手动改过标签的不动）',
           onClick: function () { refreshShelf() }
-        }, h(IconCycle, { size: 13 }), '刷新货架'),
+        }, h(IconCycle, { size: 13 }), '刷新'),
         /* 需求①：切换货架挪到查询框左边，拉窗口时不会被挤掉。 */
         h('button', {
           className: 'flb-btn flb-cycle',
           type: 'button',
           title: '切换货架：按顺序切到下一个标签',
           onClick: function () { cycleTab() }
-        }, h(IconCycle, { size: 13 }), '切换货架'),
+        }, h(IconCycle, { size: 13 }), '切换'),
         h('div', { className: 'flb-search' },
           h(IconSearch, { size: 12 }),
           h('input', {
@@ -5295,13 +5568,14 @@ function tap (fn) {
 
       /* 1.7.20：拖动 / 拉伸过程中先直接改 DOM 的位置，松手才 commit 回 store。
          原来每个 pointermove 都 store.set({ win }) → 整面货架按指针频率重画。 */
-      function paintWinRect(r) {
+      function paintWinRect(r, keepHeight) {
         var el = winEl.current
         if (!el) return
         el.style.left = r.x + 'px'
         el.style.top = r.y + 'px'
         if (r.w !== undefined) el.style.width = r.w + 'px'
-        if (r.h !== undefined) el.style.height = r.h + 'px'
+        /* 收起成一条时高度是 auto，拖窗口条绝不能把展开高度写回去 */
+        if (r.h !== undefined && !keepHeight) el.style.height = r.h + 'px'
       }
 
       /* 边框拉伸：八个方向共用一套逻辑，右下角带个小三角提示可以拉。 */
@@ -5310,17 +5584,23 @@ function tap (fn) {
         if (e.button !== undefined && e.button !== 0) return
         if (e.preventDefault) e.preventDefault()
         if (e.stopPropagation) e.stopPropagation()
+        /* 1.7.25：收起成一条时，拉边框只改这条自身的宽度，绝不展开窗口。
+           竖向的把手（s / n）按横向处理，避免在细条上拖出高度。 */
+        var miniOnly = !!st.minimized
+        var effDir = (miniOnly && dir.indexOf('e') === -1 && dir.indexOf('w') === -1) ? dir + 'e' : dir
         var start = { x: win.x, y: win.y, w: win.w, h: win.h, px: e.clientX, py: e.clientY }
         var vw = window.innerWidth
         var vh = window.innerHeight
-        var MIN_W = 520
+        var MIN_W = miniOnly ? 240 : 520
         var MIN_H = 300
 
         var last = null
+        var moved = false
         var raf = 0
         function paint() {
           raf = 0
-          if (last) paintWinRect(last)
+          /* 收起态只画位置和宽度：高度是 auto，写死高度就会把细条撑成一块。 */
+          if (last) paintWinRect(miniOnly ? { x: last.x, y: last.y, w: last.w } : last)
         }
         function schedule() {
           if (raf) return
@@ -5331,19 +5611,22 @@ function tap (fn) {
         function move(ev) {
           var dx = ev.clientX - start.px
           var dy = ev.clientY - start.py
+          if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
           var nx = start.x
           var ny = start.y
           var nw = start.w
           var nh = start.h
-          if (dir.indexOf('e') !== -1) nw = clamp(start.w + dx, MIN_W, Math.max(MIN_W, vw - start.x - 8))
-          if (dir.indexOf('s') !== -1) nh = clamp(start.h + dy, MIN_H, Math.max(MIN_H, vh - start.y - 8))
-          if (dir.indexOf('w') !== -1) {
+          if (effDir.indexOf('e') !== -1) nw = clamp(start.w + dx, MIN_W, Math.max(MIN_W, vw - start.x - 8))
+          if (effDir.indexOf('w') !== -1) {
             nw = clamp(start.w - dx, MIN_W, start.x + start.w - 8)
             nx = start.x + start.w - nw
           }
-          if (dir.indexOf('n') !== -1) {
-            nh = clamp(start.h - dy, MIN_H, start.y + start.h - 8)
-            ny = start.y + start.h - nh
+          if (!miniOnly) {
+            if (dir.indexOf('s') !== -1) nh = clamp(start.h + dy, MIN_H, Math.max(MIN_H, vh - start.y - 8))
+            if (dir.indexOf('n') !== -1) {
+              nh = clamp(start.h - dy, MIN_H, start.y + start.h - 8)
+              ny = start.y + start.h - nh
+            }
           }
           last = { x: Math.round(nx), y: Math.round(ny), w: Math.round(nw), h: Math.round(nh) }
           schedule()
@@ -5353,7 +5636,14 @@ function tap (fn) {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
           if (raf && typeof window.cancelAnimationFrame === 'function') { window.cancelAnimationFrame(raf); raf = 0 }
-          if (last) store.set({ win: last })
+          /* 1.7.23：没拖动就不提交；1.7.25：收起态只把宽度写回去，高度留给展开时用。 */
+          if (moved && last) {
+            if (miniOnly) {
+              store.set({ win: { x: last.x, y: last.y, w: last.w, h: num(store.state.win.h) || last.h } })
+            } else {
+              store.set({ win: fitRect(last) })
+            }
+          }
           store.set({ resizingWin: false })
           saveMeta()
         }
@@ -5363,11 +5653,13 @@ function tap (fn) {
         window.addEventListener('pointerup', up)
       }
 
+      /* 1.7.24：收起成一条时也摆手柄（原来是空数组），这样鼠标移到边框就是双向箭头；
+         真拉起来时 startResize 会先恢复上次尺寸、再改大小。 */
       var resizeHandles = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map(function (dir) {
         return h('div', {
           key: 'rs-' + dir,
           className: 'flb-rs flb-rs-' + dir,
-          title: '拖动边框调整货架大小',
+          title: st.minimized ? '拖动边框：调整这条窗口条的宽度' : '拖动边框调整货架大小',
           onPointerDown: function (e) { startResize(dir, e) }
         })
       })
@@ -5375,7 +5667,12 @@ function tap (fn) {
       /* 1.7.16：标题栏按钮的动作单独抽出来，坐标兜底和普通 onClick 共用同一份。 */
       function doHelp () { togglePanel('help') }
       function doSettings () { store.set({ settingsOpen: !store.state.settingsOpen, panel: null }) }
-      function doMinimize () { store.set({ minimized: !store.state.minimized }) }
+      function doMinimize () {
+        /* 1.7.24：收起时把当前矩形记下来，从收起条拉边框时用它恢复成原来的大小。 */
+        if (!store.state.minimized) store.set({ prevWin: fitRect(store.state.win || defaultRect()) })
+        store.set({ minimized: !store.state.minimized })
+        saveMeta()
+      }
       function miniGuard (fn) {
         return function (e) {
           /* 刚刚由坐标兜底执行过，就别再执行一遍。 */
@@ -5388,16 +5685,19 @@ function tap (fn) {
         if (st.maximized) return
         if (e.button !== 0) return
         var target = e.target
-        if (target && target.closest && target.closest('[data-no-drag]')) return
+        /* 1.7.27：整条窗口条都能起手拖动，只让开四个边的拉伸手柄 */
+        if (target && target.closest && target.closest('.flb-rs')) return
+        var miniOnly = !!st.minimized
         var start = { x: win.x, y: win.y, px: e.clientX, py: e.clientY, w: win.w, h: win.h }
         var vw = window.innerWidth
         var vh = window.innerHeight
 
         var last = null
+        var moved = false
         var raf = 0
         function paint() {
           raf = 0
-          if (last) paintWinRect(last)
+          if (last) paintWinRect(last, miniOnly)
         }
         function schedule() {
           if (raf) return
@@ -5406,9 +5706,12 @@ function tap (fn) {
         }
 
         function move(ev) {
+          var dx = ev.clientX - start.px
+          var dy = ev.clientY - start.py
+          if (Math.abs(dx) + Math.abs(dy) > 2) moved = true
           last = {
-            x: Math.round(clamp(start.x + (ev.clientX - start.px), -start.w + 140, vw - 140)),
-            y: Math.round(clamp(start.y + (ev.clientY - start.py), 0, Math.max(0, vh - 56))),
+            x: Math.round(clamp(start.x + dx, -start.w + 140, vw - 140)),
+            y: Math.round(clamp(start.y + dy, 0, Math.max(0, vh - 56))),
             w: start.w,
             h: start.h
           }
@@ -5419,7 +5722,14 @@ function tap (fn) {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
           if (raf && typeof window.cancelAnimationFrame === 'function') { window.cancelAnimationFrame(raf); raf = 0 }
-          if (last) store.set({ win: last })
+          if (moved && last) {
+            lastHeadDragAt = Date.now()
+            store.set({
+              win: miniOnly
+                ? { x: last.x, y: last.y, w: last.w, h: num(store.state.win.h) || last.h }
+                : fitRect(last)
+            })
+          }
           saveMeta()
         }
 
@@ -5487,6 +5797,7 @@ function tap (fn) {
           ref: winEl,
           style: style,
           'data-skin': st.skin ? st.skin.mode : 'theme',
+          'data-dark': isDarkSkin(st.skin) ? 'true' : 'false',
           'data-resizing': st.resizingWin ? 'true' : 'false',
           /* 1.7.1（需求⑤）：标价 / 点菜这些字跟着小中大一起缩。 */
           'data-card-scale': st.cardScale || 'large',
@@ -5496,7 +5807,16 @@ function tap (fn) {
           onDrop: onDrop
         },
           resizeHandles,
-          h('div', { className: 'flb-head', onPointerDown: onHeadPointerDown },
+          h('div', {
+          className: 'flb-head',
+          onPointerDown: onHeadPointerDown,
+          onClickCapture: function (e) {
+            if (Date.now() - lastHeadDragAt < 220) {
+              try { e.preventDefault() } catch (err) {}
+              try { e.stopPropagation() } catch (err) {}
+            }
+          }
+        },
             h('div', { className: 'flb-brand' },
               h('span', { className: 'flb-brand-mark' }, h(IconLunchbox, { size: 16, weight: 1.7 })),
               h('span', { className: 'flb-title' }, '肥鱼饭盒'),
@@ -5610,7 +5930,7 @@ function tap (fn) {
 
           st.minimized ? null : h(Toolbar),
           st.minimized ? null : h(PanelArea),
-          st.minimized ? null : h('div', { className: 'flb-body flb-scroll' + (count ? '' : ' flb-body-empty') + (st.tab === '套餐' ? ' flb-body-sets' : '') },
+          st.minimized ? null : h('div', { className: 'flb-body flb-scroll' + (count ? '' : ' flb-body-empty') + (st.tab === '套餐' ? ' flb-body-sets' : ''), onClick: closeSideAreas },
             /* key 换成 tag，切页时整块重挂 → 转场动画从头播一次（需求⑥）。 */
             h('div', {
               className: 'flb-swap',
@@ -5621,10 +5941,10 @@ function tap (fn) {
               ? h('div', { className: 'flb-sets' },
                 h('div', { className: 'flb-sets-main' },
                   count
-                    ? h(ShelfBody)
-                    : h('div', { className: 'flb-sets-hint' }, '这一页还空着：拖几张图进来，或用上面的「示例一件」。')),
+                    ? safe(h(ShelfBody))
+                    : h('div', { className: 'flb-sets-hint' }, '这一页还空着：拖几张图进来，或用标题栏的「上传您准备的美食包」。')),
                 h(SetRail))
-              : h(ShelfBody))),
+              : safe(h(ShelfBody)))),
           st.minimized ? null : h(TrayBar),
           st.minimized
             ? null
@@ -5961,9 +6281,13 @@ function tap (fn) {
           /* 调试 / 联调口子：脚本化验证与后续联动都用得到（不参与界面）。 */
           debug: {
             store: store,
+            ShelfWindow: ShelfWindow,
             setTab: setTab,
             setArrange: setArrange,
             setPick: setPick,
+      quietly: quietly,
+      pickSet: pickSet,
+      clearSet: clearSet,
             togglePick: togglePick,
             removeItems: removeItems,
             buildBatch: buildBatch,
@@ -5997,6 +6321,10 @@ function tap (fn) {
             resetWallet: resetWallet,
             clearAll: clearAll,
             clearShelf: clearShelf,
+            /* 1.7.21：全选 / 购物车 / 货源跳转。 */
+            markAllOnShelf: markAllOnShelf,
+            addMarkedToCart: addMarkedToCart,
+            runSearch: runSearch,
             toggleMark: toggleMark,
             /* 1.7.12：换货清理的自检口子。 */
             clearSelected: clearSelected,
@@ -6046,6 +6374,9 @@ function tap (fn) {
             clearSkin: clearSkin,
             setFontScale: setFontScale,
             skinStyle: skinStyle,
+      lumOf: lumOf,
+      isDarkSkin: isDarkSkin,
+      closeSideAreas: closeSideAreas,
             cssFor: cssFor,
             installFileDropGuard: installFileDropGuard,
             isInsideShelf: isInsideShelf,
