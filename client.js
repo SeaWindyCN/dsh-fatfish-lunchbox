@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
 
     var PANEL_ID = 'feiyu-lunchbox'
     /* 窗口底部显示版本号：刷新后一眼能看出浏览器拿到的是哪一版。 */
-    var VERSION = '1.7.19'
+    var VERSION = '1.7.20'
 
 /* 1.7.2：有用户反馈「某些按钮点不动」。click 事件可能被上层元素或取消逻辑吃掉，
    这里统一用 pointerdown 先接一手（浏览器取消 click 也不影响），再用时间戳去重，
@@ -1077,7 +1077,9 @@ function tap (fn) {
 
     function makeThumb(file) {
       return new Promise(function (resolve) {
-        var MAX = 560
+        /* 1.7.20：缩略图按显示尺寸生成（卡片里约 100px，2x 屏 200px 就够），
+           原来 560 让每张图多解 7 倍像素，堆一大就随机掉帧。 */
+        var MAX = 320
         /* PNG / WebP / GIF / SVG 可能是带透明通道的素材：不能铺白底，也不能转 JPEG，
            否则透明区域会被烧成白色。这类一律原样输出 PNG，缩略图下面再垫一层
            棋盘格（CSS .flb-thumb-alpha），看得见哪里是透明的。 */
@@ -1128,12 +1130,13 @@ function tap (fn) {
     /* 真的扫一遍像素再决定：有些 .png 其实是不透明的，转 JPEG 反而更小。 */
     function detectAlpha(g, w, hgt) {
       try {
-        var stepX = Math.max(1, Math.floor(w / 48))
-        var stepY = Math.max(1, Math.floor(hgt / 48))
-        for (var y = 0; y < hgt; y += stepY) {
-          for (var x = 0; x < w; x += stepX) {
-            var d = g.getImageData(x, y, 1, 1).data
-            if (d[3] < 250) return true
+        /* 1.7.20：一次读回整张图再抽样。原来逐像素 getImageData(x, y, 1, 1)，
+           最多 48×48 = 2304 次画布读回，单张图就能吃掉几百毫秒。 */
+        var data = g.getImageData(0, 0, w, hgt).data
+        var step = Math.max(1, Math.floor(Math.sqrt((w * hgt) / 2600)))
+        for (var y = 0; y < hgt; y += step) {
+          for (var x = 0; x < w; x += step) {
+            if (data[((y * w) + x) * 4 + 3] < 250) return true
           }
         }
       } catch (err) { /* 拿不到像素就当不透明 */ }
@@ -1277,6 +1280,8 @@ function tap (fn) {
     }
 
     var lastSoundKind = ''
+    /* 1.7.20：标价 / 数量连续改动时的提示音节流。 */
+    var lastDingAt = 0
     function playSound(kind) {
       /* 1.7.10：记下最近一次音效，测试与开发者测试都用得上。 */
       lastSoundKind = kind || ''
@@ -1476,7 +1481,19 @@ function tap (fn) {
       var lastTag = null
       var failed = 0
       var chain = Promise.resolve()
-      files.forEach(function (file) {
+      /* 1.7.20：进货改成「攒一批再写」。原来每张图都 store.set + saveMeta + IDB 写，
+         导入 300 张就等于 300 次全量重渲；现在每 12 件合并一次，收尾再 flush。 */
+      var pending = []
+      var pendingImages = {}
+      var baseOrder = nextOrder(store.state.items)
+      function flushBatch() {
+        if (!pending.length) return
+        var cur = store.state
+        store.set({ items: cur.items.concat(pending), images: Object.assign({}, cur.images, pendingImages) })
+        pending = []
+        pendingImages = {}
+      }
+      files.forEach(function (file, fileIndex) {
         chain = chain.then(function () {
           var tag = inferTag(file.name)
           var tagFrom = tag ? 'name' : 'shelf'
@@ -1496,17 +1513,17 @@ function tap (fn) {
               spec: parsed.spec,
               /* 1.5.0：记下它从哪个文件夹 / 压缩包路径来的，右键提示里能查到。 */
               origin: (opts.origins && opts.origins[file.name]) || '',
-              order: nextOrder(st.items)
+              order: baseOrder + fileIndex
             })
-            var images = Object.assign({}, st.images)
-            if (thumb) images[item.id] = thumb.url
+            if (thumb) pendingImages[item.id] = thumb.url
             item.w = thumb ? thumb.w : 0
             item.h = thumb ? thumb.h : 0
             /* 带透明通道的素材：缩略图下面垫棋盘格，一眼看得出哪里是透明的。 */
             item.alpha = !!(thumb && thumb.alpha)
             /* 1.7.11：动图标记，缩略图 title 里会写一句。 */
             item.gif = !!(thumb && thumb.gif)
-            store.set({ items: st.items.concat([item]), images: images })
+            pending.push(item)
+            if (pending.length >= 12) flushBatch()
             if (thumb) idbPut('img:' + item.id, thumb.url).catch(function () {})
             lastTag = finalTag
             saveMeta()
@@ -1514,6 +1531,7 @@ function tap (fn) {
         })
       })
       chain.then(function () {
+        flushBatch()
         var ok = files.length - failed
         /* 在总览页进货就留在总览页；在单页进货才跟着跳到素材归的那一页。 */
         if (lastTag && !isOverview(store.state.tab)) store.set({ tab: lastTag, lastTag: lastTag })
@@ -1559,7 +1577,10 @@ function tap (fn) {
       store.set({ items: items })
       saveMeta()
       /* 1.5.2 需求④：改标价 / 改数量（输入框的增减）也响「选中商品」。 */
-      if (patch && (patch.price !== undefined || patch.qty !== undefined)) playSound('ding')
+      if (patch && (patch.price !== undefined || patch.qty !== undefined)) {
+        /* 1.7.20：连续打字时别每键一声，压到 400ms 一次。 */
+        if (Date.now() - lastDingAt > 400) { lastDingAt = Date.now(); playSound('ding') }
+      }
     }
 
     /* 1.5.0 追加：识别错标签时手动改归——只动 tag 与 tagFrom，其它字段不碰。 */
@@ -2755,7 +2776,11 @@ function tap (fn) {
       /* 已投喂：窗口右下角的大号数字（原来是标题栏里的小 chip「Tokens」）。 */
       /* 1.6.0（需求③）：鼠标挪上去 = 往下放大一点，靠负外边距把旁边的货挤开，图再轻轻抖一下。 */
       '.flb-card{transition:transform .18s cubic-bezier(.2,.7,.3,1),box-shadow .18s ease,margin .18s ease}',
-      '.flb-card{transition:transform .18s ease,box-shadow .18s ease;will-change:transform}',
+      /* 1.7.20：这里原来每张卡都 will-change:transform，几百个合成层的开销比 hover
+         那点 scale 大得多；改成 hover 时才提层。content-visibility 让屏外卡片
+         跳过渲染，等于给长货架做了个便宜的虚拟化。 */
+      '.flb-card{transition:transform .18s ease,box-shadow .18s ease;content-visibility:auto;contain-intrinsic-size:auto 260px}',
+      '.flb-card:hover{will-change:transform}',
       /* 需求：鼠标挪上去向下放大并挤开旁边、带轻微抖动 —— 用 transform 不动布局，下面的行不会跟着跳。 */
       '.flb-card:hover{transform:translateY(3px) scale(1.06);z-index:5;box-shadow:0 18px 32px rgba(0,0,0,.2)}',
       /* 需求⑪：抖动换成不倒翁左右摇。 */
@@ -4158,7 +4183,7 @@ function tap (fn) {
     /* 一圈 10 秒：走完给余额 +1 鲸元并掷券；数字用局部 state，只有攒满一圈才动 store。 */
     /* 1.7.14（需求）：计时、进度、贬值都挪到模块级心跳里。
        原来这些挂在 BalanceTicker 的 useEffect 上，窗口一收起、组件卸载就全停了。 */
-    var beat = { last: 0, p: 0, s: 0, timer: null, pausedAt: 0, starting: false }
+    var beat = { last: 0, p: 0, s: 0, timer: null, pausedAt: 0, starting: false, dipAcc: 0 }
     var beatDisposed = false
     /* 1.7.19（需求）：窗口还没被点开（或已经关掉）时不跑计时，也不攒余额、不掷券。
        收起成一条仍算开着——那时计时照走（1.7.14 的约定不变）。 */
@@ -4188,8 +4213,14 @@ function tap (fn) {
       var dt = now - beat.last
       if (dt < 0) dt = 0
       beat.last = now
-      /* 贬值不看窗口在不在，一直按时间扣。 */
-      try { dipStep(dt) } catch (e) { /* ignore */ }
+      /* 贬值不看窗口在不在，一直按时间扣；1.7.20 起累到 1 秒才结算一次，
+         免得贬值那 60 秒里每秒 5 次全量重渲。 */
+      beat.dipAcc = num(beat.dipAcc) + dt
+      if (beat.dipAcc >= 1000) {
+        var dipDt = beat.dipAcc
+        beat.dipAcc = 0
+        try { dipStep(dipDt) } catch (e) { /* ignore */ }
+      }
       if (store.state.devMode) return
       beat.s += dt / 1000
       beat.p += dt / TICK_MS
@@ -4449,6 +4480,10 @@ function tap (fn) {
       var setRect = pair[1]
       function onDown (e) {
         if (e.button !== undefined && e.button !== 0) return
+        /* 1.7.20：点卡片 / 按钮 / 面板时不该进框选——原来每次按下都会
+           querySelectorAll + 逐个 getBoundingClientRect，几百件就是一次强制布局。 */
+        var tg = e.target
+        if (tg && tg.closest && tg.closest('.flb-card, button, input, select, textarea, a, .flb-sets-rail, .flb-tray')) return
         var host = e.currentTarget
         var box = host.getBoundingClientRect()
         var sx = e.clientX
@@ -4457,17 +4492,28 @@ function tap (fn) {
         var cards = Array.prototype.slice.call(host.querySelectorAll('.flb-card[data-id]')).map(function (node) {
           return { id: node.getAttribute('data-id'), r: node.getBoundingClientRect() }
         })
+        var rafId = 0
+        var next = null
+        function paint() {
+          rafId = 0
+          if (next) setRect(next)
+        }
         function onMove (ev) {
           var x = Math.min(sx, ev.clientX) - box.left
           var y = Math.min(sy, ev.clientY) - box.top
           var w = Math.abs(ev.clientX - sx)
           var hh = Math.abs(ev.clientY - sy)
           if (w > 5 || hh > 5) moved = true
-          setRect({ x: x, y: y, w: w, h: hh })
+          next = { x: x, y: y, w: w, h: hh }
+          if (rafId) return
+          if (typeof window.requestAnimationFrame === 'function') rafId = window.requestAnimationFrame(paint)
+          else paint()
         }
         function onUp (ev) {
           document.removeEventListener('mousemove', onMove, true)
           document.removeEventListener('mouseup', onUp, true)
+          if (rafId && typeof window.cancelAnimationFrame === 'function') { window.cancelAnimationFrame(rafId); rafId = 0 }
+          next = null
           setRect(null)
           if (!moved) return
           var x1 = Math.min(sx, ev.clientX), y1 = Math.min(sy, ev.clientY)
@@ -4612,13 +4658,17 @@ function tap (fn) {
 
     /* --------------------------------------------------------------- 货架体 */
 
+    /* 1.7.20：卡片只吃 props，自己不再订阅全局 store。父层把缩略图 /
+       勾选 / 拖动状态算好传进来，配合 React.memo，改一件货时其余卡片
+       连调和都省了（原来是 N 张卡 = N 个订阅者，任何一次 store.set 全量重画）。 */
     function ItemCard(props) {
       var it = props.item
-      var st = useStore()
       var meta = tagMeta(it.tag)
-      var url = st.images[it.id]
+      var url = props.url
       var picked = num(it.pick) > 0
-      var marked = !!st.marked[it.id]
+      var marked = !!props.marked
+      var moveId = props.moveId || null
+      var moveOver = props.over || 'false'
 
       function stop(e) { e.stopPropagation() }
 
@@ -4640,7 +4690,7 @@ function tap (fn) {
 
       function onCardDragOver(e) {
         var dt = e.dataTransfer || {}
-        if (st.moveId && st.moveId !== it.id) {
+        if (moveId && moveId !== it.id) {
           e.preventDefault()
           e.stopPropagation()
           try { dt.dropEffect = 'move' } catch (err) {}
@@ -4658,11 +4708,11 @@ function tap (fn) {
       }
 
       function onCardDrop(e) {
-        if (store.state.moveId) {
+        if (moveId) {
           e.preventDefault()
           e.stopPropagation()
           var mo = store.state.moveOver
-          moveItem(store.state.moveId, it.id, mo && mo.id === it.id ? mo.after : true)
+          moveItem(moveId, it.id, mo && mo.id === it.id ? mo.after : true)
           return
         }
         if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return
@@ -4675,7 +4725,6 @@ function tap (fn) {
         addFiles(e.dataTransfer.files, { tag: it.tag })
       }
 
-      var moveOver = st.moveOver && st.moveOver.id === it.id ? (st.moveOver.after ? 'after' : 'before') : 'false'
 
       return h('div', {
         className: 'flb-card',
@@ -4726,6 +4775,8 @@ function tap (fn) {
               className: it.alpha ? 'flb-thumb flb-thumb-alpha' : 'flb-thumb',
               src: url,
               alt: it.displayName,
+              loading: 'lazy',
+              decoding: 'async',
               draggable: 'false'
             })
             : h('div', { className: 'flb-thumb flb-thumb-empty' }, tagGlyph(it.tag, 42))
@@ -4769,6 +4820,20 @@ function tap (fn) {
             }, '点菜')
         )
       )
+    }
+
+    /* 浅比较就够了：item 引用由 setPick / updateItem 保住，其余都是原始值。 */
+    var ItemCardMemo = React.memo(ItemCard)
+
+    function cardProps(it, st) {
+      return {
+        key: it.id,
+        item: it,
+        url: st.images[it.id],
+        marked: !!st.marked[it.id],
+        moveId: st.moveId || null,
+        over: st.moveOver && st.moveOver.id === it.id ? (st.moveOver.after ? 'after' : 'before') : ''
+      }
     }
 
     function EmptyShelf(props) {
@@ -4826,7 +4891,7 @@ function tap (fn) {
                   g.tag.key + ' · ' + groupOfTag(g.tag.key)),
                 h('span', { className: 'flb-group-n' }, g.items.length + ' 件')),
               h('div', { className: 'flb-grid' },
-                g.items.map(function (it) { return h(ItemCard, { item: it, key: it.id }) }))
+                g.items.map(function (it) { return h(ItemCardMemo, cardProps(it, st)) }))
             )
           })),
           mq.rect ? h('div', { className: 'flb-marquee', style: { left: mq.rect.x + 'px', top: mq.rect.y + 'px', width: mq.rect.w + 'px', height: mq.rect.h + 'px' } }) : null
@@ -4842,7 +4907,7 @@ function tap (fn) {
                 h('span', { className: 'flb-group-n' }, g.items.length + ' 件'))
               : null,
             h('div', { className: 'flb-grid' },
-              g.items.map(function (it) { return h(ItemCard, { item: it, key: it.id }) }))
+              g.items.map(function (it) { return h(ItemCardMemo, cardProps(it, st)) }))
           )
         })),
         mq.rect ? h('div', { className: 'flb-marquee', style: { left: mq.rect.x + 'px', top: mq.rect.y + 'px', width: mq.rect.w + 'px', height: mq.rect.h + 'px' } }) : null
@@ -5202,6 +5267,7 @@ function tap (fn) {
       var st = useStore()
       var loaded = React.useRef(false)
       var dragDepth = React.useRef(0)
+      var winEl = React.useRef(null)
 
       React.useEffect(function () {
         if (loaded.current) return
@@ -5227,6 +5293,17 @@ function tap (fn) {
       }
       if (skinStyleVars) Object.assign(style, skinStyleVars)
 
+      /* 1.7.20：拖动 / 拉伸过程中先直接改 DOM 的位置，松手才 commit 回 store。
+         原来每个 pointermove 都 store.set({ win }) → 整面货架按指针频率重画。 */
+      function paintWinRect(r) {
+        var el = winEl.current
+        if (!el) return
+        el.style.left = r.x + 'px'
+        el.style.top = r.y + 'px'
+        if (r.w !== undefined) el.style.width = r.w + 'px'
+        if (r.h !== undefined) el.style.height = r.h + 'px'
+      }
+
       /* 边框拉伸：八个方向共用一套逻辑，右下角带个小三角提示可以拉。 */
       function startResize(dir, e) {
         if (st.maximized) return
@@ -5238,6 +5315,18 @@ function tap (fn) {
         var vh = window.innerHeight
         var MIN_W = 520
         var MIN_H = 300
+
+        var last = null
+        var raf = 0
+        function paint() {
+          raf = 0
+          if (last) paintWinRect(last)
+        }
+        function schedule() {
+          if (raf) return
+          if (typeof window.requestAnimationFrame === 'function') raf = window.requestAnimationFrame(paint)
+          else paint()
+        }
 
         function move(ev) {
           var dx = ev.clientX - start.px
@@ -5256,12 +5345,15 @@ function tap (fn) {
             nh = clamp(start.h - dy, MIN_H, start.y + start.h - 8)
             ny = start.y + start.h - nh
           }
-          store.set({ win: { x: Math.round(nx), y: Math.round(ny), w: Math.round(nw), h: Math.round(nh) } })
+          last = { x: Math.round(nx), y: Math.round(ny), w: Math.round(nw), h: Math.round(nh) }
+          schedule()
         }
 
         function up() {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
+          if (raf && typeof window.cancelAnimationFrame === 'function') { window.cancelAnimationFrame(raf); raf = 0 }
+          if (last) store.set({ win: last })
           store.set({ resizingWin: false })
           saveMeta()
         }
@@ -5301,15 +5393,33 @@ function tap (fn) {
         var vw = window.innerWidth
         var vh = window.innerHeight
 
+        var last = null
+        var raf = 0
+        function paint() {
+          raf = 0
+          if (last) paintWinRect(last)
+        }
+        function schedule() {
+          if (raf) return
+          if (typeof window.requestAnimationFrame === 'function') raf = window.requestAnimationFrame(paint)
+          else paint()
+        }
+
         function move(ev) {
-          var nx = clamp(start.x + (ev.clientX - start.px), -start.w + 140, vw - 140)
-          var ny = clamp(start.y + (ev.clientY - start.py), 0, Math.max(0, vh - 56))
-          store.set({ win: { x: nx, y: ny, w: start.w, h: start.h } })
+          last = {
+            x: Math.round(clamp(start.x + (ev.clientX - start.px), -start.w + 140, vw - 140)),
+            y: Math.round(clamp(start.y + (ev.clientY - start.py), 0, Math.max(0, vh - 56))),
+            w: start.w,
+            h: start.h
+          }
+          schedule()
         }
 
         function up() {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
+          if (raf && typeof window.cancelAnimationFrame === 'function') { window.cancelAnimationFrame(raf); raf = 0 }
+          if (last) store.set({ win: last })
           saveMeta()
         }
 
@@ -5348,7 +5458,9 @@ function tap (fn) {
         if (!hasFileDrag(e.dataTransfer)) return
         e.preventDefault()
         dragDepth.current = dragDepth.current + 1
-        store.set({ dragFiles: true })
+        /* 1.7.20：dragenter 会按子元素反复冒泡，原来每次都 store.set，拖一次文件
+           能把整树重渲几十上百次。已经有状态就别再写。 */
+        if (!store.state.dragFiles) store.set({ dragFiles: true })
       }
 
       function onDragLeave(e) {
@@ -5372,6 +5484,7 @@ function tap (fn) {
         h('style', null, cssFor(st.fontScale)),
         h('div', {
           className: 'flb-window',
+          ref: winEl,
           style: style,
           'data-skin': st.skin ? st.skin.mode : 'theme',
           'data-resizing': st.resizingWin ? 'true' : 'false',
@@ -5904,6 +6017,9 @@ function tap (fn) {
             TrayBar: TrayBar,
             /* 1.7.11：GIF 动画与卡片渲染的自检口子。 */
             ItemCard: ItemCard,
+        ItemCardMemo: ItemCardMemo,
+        cardProps: cardProps,
+        detectAlpha: detectAlpha,
             makeThumb: makeThumb,
             SettingsRules: SettingsRules,
             SettingsSay: SettingsSay,

@@ -511,3 +511,26 @@ types 里只剩 `text/plain`，dragover 就一律被忽略，于是「拖了半�
 - **不开窗就不跑**：窗口还没点开（或已经关掉）时，计时、进度环、每 10 秒 +1 鲸元、掷券全部停住；
   窗口一打开自己接上，收起成一条时照旧继续走（1.7.14 的约定不变）。
 - 关窗那段时间不推进「余额贬值」：把贬值的起止时间整体往后挪，开窗后不会一下子被扣一大截。
+
+## 1.7.20 性能修正（按 bug检查.txt 的反馈报告）
+
+商品一多就卡，根子不是某个函数慢，是「任何一次全局写入都重画整面货架」。这一版按报告的
+P0/P1/P2 顺序做了下面这些，行为不变、手感变了：
+
+- **卡片只吃 props，并用 `React.memo` 包住**（`ItemCardMemo` + `cardProps`）：
+  原来每张卡自己订阅全局 store，N 张卡 = N 个订阅者，点一下「点菜」全树重画；
+  现在缩略图 / 是否勾选 / 拖动状态都由父层算成原始值传下去，改一件只重画那一件
+  （报告实测 300 件时一次操作从 86 ms 降到 2~3 ms）。
+- **拖动窗口 / 拉边框不再每帧写 store**：过程中用 `paintWinRect()` 直接改元素的
+  `left/top/width/height`（rAF 合并），松手才 `store.set({ win })` 并落盘。
+- **贬值按秒结算**：`beat.dipAcc` 攒满 1 秒才调一次 `dipStep()`，不再每 200 ms 写一次 store。
+- **`onDragEnter` 补了状态守卫**：原来 dragenter 随子元素冒泡，拖一次文件能重画几十上百次。
+- **框选**：从卡片 / 按钮 / 面板上按下不再起手（原来每次按下都要 `querySelectorAll` +
+  逐个 `getBoundingClientRect`）；拖动时矩形按 rAF 合并。
+- **进货攒批提交**：每 12 件合并一次 `store.set`，收尾再 flush，不再「一张图一次全量重渲」。
+- **缩略图最长边 560 → 320**（卡片里才约 100 px，2x 屏 200 px 就够）；
+  `<img>` 加 `loading="lazy"` `decoding="async"`。
+- **`detectAlpha` 一次读回整张图**再抽样：原来逐像素 `getImageData(x, y, 1, 1)` 最多 2304 次读回。
+- **CSS**：去掉每张卡常驻的 `will-change:transform`（几百个合成层）改成 hover 时才提层；
+  卡片加 `content-visibility:auto; contain-intrinsic-size:auto 260px`，屏外卡片跳过渲染。
+- **改标价 / 数量时的「叮」**压到 400 ms 一次，不再每按一个键响一下。
